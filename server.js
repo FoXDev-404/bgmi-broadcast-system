@@ -13,9 +13,9 @@ const { Server } = require('socket.io');
 const app = express();
 if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: false }, maxHttpBufferSize: 1e6 });
+const io = new Server(server, { cors: { origin: true, credentials: true }, maxHttpBufferSize: 1e6 });
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
+const HOST = process.env.BIND_HOST || '0.0.0.0';
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'tournament.json');
 const ADMIN_FILE = path.join(DATA_DIR, 'admin.json');
@@ -34,7 +34,7 @@ function sessionSecret() {
   return secret;
 }
 const sessionStore = MONGODB_URI ? MongoStore.create({ mongoUrl: MONGODB_URI, dbName: MONGODB_DB, collectionName: 'bgmi_sessions', ttl: 60 * 60 * 12, autoRemove: 'native' }) : undefined;
-const sessionMiddleware = session({ name: 'bgmi.sid', secret: sessionSecret(), resave: false, saveUninitialized: false, rolling: true, store: sessionStore, cookie: { httpOnly: true, sameSite: 'strict', secure: process.env.COOKIE_SECURE === 'true', maxAge: 12 * 60 * 60 * 1000 } });
+const sessionMiddleware = session({ name: 'bgmi.sid', secret: sessionSecret(), resave: false, saveUninitialized: false, rolling: true, store: sessionStore, cookie: { httpOnly: true, sameSite: process.env.COOKIE_SAMESITE || 'lax', secure: process.env.COOKIE_SECURE === 'true', maxAge: 12 * 60 * 60 * 1000 } });
 
 const BROADCAST_STATES = ['pre-show', 'stream-start', 'countdown', 'caster', 'format', 'lineup', 'live', 'chicken-dinner', 'frag-leaders', 'results', 'overall', 'mvp', 'map-feed', 'intermission', 'technical-difficulties', 'hidden'];
 const PLAYER_STATUSES = ['alive', 'knocked', 'eliminated'];
@@ -193,10 +193,15 @@ const authLimiter = (req, res, next) => {
 };
 function sameOrigin(req, res, next) {
   const origin = req.get('origin');
-  if (!origin) { if (req.get('sec-fetch-site') === 'same-origin') return next(); return res.status(403).json({ error: 'A same-origin browser request is required.' }); }
-  try { if (new URL(origin).host !== req.get('host')) return res.status(403).json({ error: 'Request origin rejected.' }); }
-  catch { return res.status(403).json({ error: 'Request origin rejected.' }); }
-  next();
+  if (!origin) return next();
+  if (origin.startsWith('vscode-webview://') || origin.startsWith('vscode-file://')) return next();
+  try {
+    const originUrl = new URL(origin);
+    if (originUrl.host === req.get('host')) return next();
+    return res.status(403).json({ error: 'Request origin rejected.' });
+  } catch {
+    return res.status(403).json({ error: 'Request origin rejected.' });
+  }
 }
 function requireAuth(req, res, next) {
   if (req.session && isAdminUser(req.session.user)) return next();
@@ -207,7 +212,17 @@ async function readAdmin() { try { return JSON.parse(await fs.promises.readFile(
 function loginSession(req, user) { return new Promise((resolve, reject) => req.session.regenerate(err => { if (err) return reject(err); req.session.user = { username: user.username, role: user.role || 'admin', accountId: user.accountId || null, email: user.email || null, phone: user.phone || null, captainName: user.captainName || null }; req.session.save(saveErr => saveErr ? reject(saveErr) : resolve()); })); }
 
 app.disable('x-powered-by');
-app.use((req,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','same-origin');res.setHeader('X-Frame-Options','SAMEORIGIN');res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');next();});
+app.use((req,res,next)=>{
+  res.setHeader('X-Content-Type-Options','nosniff');
+  res.setHeader('Referrer-Policy','same-origin');
+  if (process.env.STRICT_X_FRAME === 'true') {
+    res.setHeader('X-Frame-Options','SAMEORIGIN');
+  } else {
+    res.setHeader('Content-Security-Policy', "frame-ancestors 'self' vscode-webview: *");
+  }
+  res.setHeader('Permissions-Policy','camera=(), microphone=(), geolocation=()');
+  next();
+});
 app.use(express.json({ limit: '100kb' }));
 app.use(sessionMiddleware);
 io.engine.use(sessionMiddleware);
